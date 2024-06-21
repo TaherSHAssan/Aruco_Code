@@ -1,0 +1,141 @@
+import rospy
+from mavros_msgs.msg import State
+from mavros_msgs.srv import CommandBool, CommandTOL, SetMode
+import cv2
+import cv2.aruco as aruco
+import numpy as np
+import math
+
+
+
+
+def detect_aruco_markers(frame, aruco_dict, camera_matrix, camera_distortion):
+
+
+def arm():
+
+
+def takeoff(altitude):
+
+def land():
+
+def disarm():
+
+
+def set_mode(mode):
+
+
+def isRotationMatrix(R):
+
+def rotationMatrixToEulerAngles(R):
+
+marker_size = 10
+
+def main():
+    global current_state
+    rospy.init_node('aruco_marker_detection_and_control', anonymous=True)
+    rospy.Subscriber('/mavros/state', State, state_callback)
+    rospy.loginfo("Initializing...")
+
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        rospy.logerr("Failed to open camera")
+        return
+
+    rospy.loginfo("Camera initialized")
+
+    while current_state is None and not rospy.is_shutdown():
+        rospy.sleep(0.1)
+
+    if not set_mode("STABILIZE"):
+        rospy.logerr("Failed to set mode to STABILIZE")
+        return
+
+    rospy.sleep(2)
+
+    if not arm():
+        rospy.logerr("Failed to arm the drone")
+        return
+
+    rospy.sleep(2)
+
+    if not set_mode("GUIDED"):
+        rospy.logerr("Failed to set mode to GUIDED")
+        return
+
+    while current_state.mode != "GUIDED" and not rospy.is_shutdown():
+        rospy.loginfo("Waiting for GUIDED mode...")
+        rospy.sleep(1)
+
+    rospy.loginfo("Current state: %s", current_state)
+
+    if not current_state.armed:
+        rospy.logerr("Drone is not armed. Attempting to arm again...")
+        if not arm():
+            rospy.logerr("Failed to arm the drone")
+            return
+
+    rospy.sleep(2)
+
+    if not takeoff(2):
+        rospy.logerr("Takeoff failed")
+        return
+
+    with open('camera_cal.npy', 'rb') as f:
+        camera_matrix = np.load(f)
+        camera_distortion = np.load(f)
+
+    aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_250)
+    downsample_factor = 2
+    frame_counter = 0
+    last_command_time = rospy.Time.now()
+    command_interval = rospy.Duration(10)
+
+    while not rospy.is_shutdown():
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        frame_counter += 1
+        if frame_counter % downsample_factor != 0:
+            continue
+
+        frame = cv2.resize(frame, (0, 0), fx=1/downsample_factor, fy=1/downsample_factor)
+        corners, ids = detect_aruco_markers(frame, aruco_dict, camera_matrix, camera_distortion)
+
+        if ids is not None:
+            aruco.drawDetectedMarkers(frame, corners)
+            pose_data = aruco.estimatePoseSingleMarkers(corners, marker_size, camera_matrix, camera_distortion)
+            if pose_data is not None:
+                rvecs, tvecs, _ = pose_data
+                for i in range(len(ids)):
+                    rvec = rvecs[i][0]
+                    tvec = tvecs[i][0]
+                    aruco.drawAxis(frame, camera_matrix, camera_distortion, rvec, tvec, 100)
+                    cv2.putText(frame, str(ids[i][0]), (int(corners[i][0][0][0]) - 30, int(corners[i][0][0][1])),
+                                cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 2, cv2.LINE_AA)
+
+                    rvec_flipped = rvec * -1
+                    tvec_flipped = tvec * -1
+                    rotation_matrix, _ = cv2.Rodrigues(rvec_flipped)
+                    realworld_tvec = np.dot(rotation_matrix, tvec_flipped)
+
+                    pitch, roll, yaw = rotationMatrixToEulerAngles(rotation_matrix)
+
+                    tvec_str = "x=%4.0f y=%4.0f z=%4.0f angle=%4.0f" % (
+                        realworld_tvec[0] / 10, realworld_tvec[1] / 10, realworld_tvec[2] / 10, math.degrees(yaw))
+                    cv2.putText(frame, tvec_str, (10, 400), cv2.FONT_HERSHEY_PLAIN, 1, (0, 0, 255), 2, cv2.LINE_AA)
+
+                    current_time = rospy.Time.now()
+                    if current_time - last_command_time > command_interval:
+                        if ids[i][0] == 0:
+                            rospy.loginfo("ArUco marker 0 detected. Landing...")
+                            land()
+                            last_command_time = current_time
+                            rospy.sleep(15)
+                            disarm()
+                        elif ids[i][0] == 1:
+                            rospy.loginfo("ArUco marker 1 detected. Disarming...")
+                            disarm()
+                            last_command_time = current_time
+
